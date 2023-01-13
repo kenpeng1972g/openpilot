@@ -1,3 +1,4 @@
+#include <sys/file.h>
 #include <sys/ioctl.h>
 #include <linux/spi/spidev.h>
 
@@ -84,6 +85,8 @@ void PandaSpiHandle::cleanup() {
 
 
 int PandaSpiHandle::control_write(uint8_t request, uint16_t param1, uint16_t param2, unsigned int timeout) {
+  LockEx lock(spi_fd);
+
   ControlPacket_t packet = {
     .request = request,
     .param1 = param1,
@@ -94,6 +97,8 @@ int PandaSpiHandle::control_write(uint8_t request, uint16_t param1, uint16_t par
 }
 
 int PandaSpiHandle::control_read(uint8_t request, uint16_t param1, uint16_t param2, unsigned char *data, uint16_t length, unsigned int timeout) {
+  LockEx lock(spi_fd);
+
   ControlPacket_t packet = {
     .request = request,
     .param1 = param1,
@@ -104,9 +109,12 @@ int PandaSpiHandle::control_read(uint8_t request, uint16_t param1, uint16_t para
 }
 
 int PandaSpiHandle::bulk_write(unsigned char endpoint, unsigned char* data, int length, unsigned int timeout) {
+  LockEx lock(spi_fd);
   return bulk_transfer(endpoint, data, length, NULL, 0);
 }
+
 int PandaSpiHandle::bulk_read(unsigned char endpoint, unsigned char* data, int length, unsigned int timeout) {
+  LockEx lock(spi_fd);
   return bulk_transfer(endpoint, NULL, 0, data, length);
 }
 

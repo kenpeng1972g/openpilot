@@ -1,6 +1,7 @@
 #pragma once
 
 #include <fcntl.h>
+#include <sys/file.h>
 #include <sys/stat.h>
 #include <unistd.h>
 #include <zmq.h>
@@ -161,6 +162,21 @@ public:
 
 private:
   float x_, k_;
+};
+
+class LockEx {
+public:
+  LockEx(int fd) {
+    _fd = fd;
+    flock(_fd, LOCK_EX);
+  };
+
+  ~LockEx() {
+    flock(_fd, LOCK_UN);
+  }
+
+private:
+  int _fd;
 };
 
 template<typename T>
