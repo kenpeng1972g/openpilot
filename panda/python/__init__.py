@@ -13,12 +13,10 @@ from functools import wraps
 from typing import Optional
 from itertools import accumulate
 
-from .dfu import PandaDFU, MCU_TYPE_F2, MCU_TYPE_F4, MCU_TYPE_H7  # pylint: disable=import-error
-from .flash_release import flash_release  # noqa pylint: disable=import-error
-from .update import ensure_st_up_to_date  # noqa pylint: disable=import-error
-from .serial import PandaSerial  # noqa pylint: disable=import-error
-from .isotp import isotp_send, isotp_recv  # pylint: disable=import-error
-from .config import DEFAULT_FW_FN, DEFAULT_H7_FW_FN, SECTOR_SIZES_FX, SECTOR_SIZES_H7  # noqa pylint: disable=import-error
+from .config import DEFAULT_FW_FN, DEFAULT_H7_FW_FN, SECTOR_SIZES_FX, SECTOR_SIZES_H7
+from .dfu import PandaDFU, MCU_TYPE_F2, MCU_TYPE_F4, MCU_TYPE_H7
+from .isotp import isotp_send, isotp_recv
+from .spi import SpiHandle
 
 __version__ = '0.0.10'
 
@@ -31,78 +29,70 @@ BASEDIR = os.path.join(os.path.dirname(os.path.realpath(__file__)), "../")
 
 DEBUG = os.getenv("PANDADEBUG") is not None
 
-CANPACKET_HEAD_SIZE = 0x5
+USBPACKET_MAX_SIZE = 0x40
+CANPACKET_HEAD_SIZE = 0x6
 DLC_TO_LEN = [0, 1, 2, 3, 4, 5, 6, 7, 8, 12, 16, 20, 24, 32, 48, 64]
 LEN_TO_DLC = {length: dlc for (dlc, length) in enumerate(DLC_TO_LEN)}
 
+def calculate_checksum(data):
+  res = 0
+  for b in data:
+    res ^= b
+  return res
+
 def pack_can_buffer(arr):
   snds = [b'']
-  idx = 0
   for address, _, dat, bus in arr:
     assert len(dat) in LEN_TO_DLC
-    if DEBUG:
-      print(f"  W 0x{address:x}: 0x{dat.hex()}")
+    #logging.debug("  W 0x%x: 0x%s", address, dat.hex())
+
     extended = 1 if address >= 0x800 else 0
     data_len_code = LEN_TO_DLC[len(dat)]
-    header = bytearray(5)
+    header = bytearray(CANPACKET_HEAD_SIZE)
     word_4b = address << 3 | extended << 2
     header[0] = (data_len_code << 4) | (bus << 1)
     header[1] = word_4b & 0xFF
     header[2] = (word_4b >> 8) & 0xFF
     header[3] = (word_4b >> 16) & 0xFF
     header[4] = (word_4b >> 24) & 0xFF
-    snds[idx] += header + dat
-    if len(snds[idx]) > 256: # Limit chunks to 256 bytes
-      snds.append(b'')
-      idx += 1
+    header[5] = calculate_checksum(header[:5] + dat)
 
-  # Apply counter to each 64 byte packet
-  for idx in range(len(snds)):
-    tx = b''
-    counter = 0
-    for i in range (0, len(snds[idx]), 63):
-      tx += bytes([counter]) + snds[idx][i:i+63]
-      counter += 1
-    snds[idx] = tx
+    snds[-1] += header + dat
+    if len(snds[-1]) > 256: # Limit chunks to 256 bytes
+      snds.append(b'')
+
   return snds
 
 def unpack_can_buffer(dat):
   ret = []
-  counter = 0
-  tail = bytearray()
-  for i in range(0, len(dat), 64):
-    if counter != dat[i]:
-      print("CAN: LOST RECV PACKET COUNTER")
+
+  while len(dat) >= CANPACKET_HEAD_SIZE:
+    data_len = DLC_TO_LEN[(dat[0]>>4)]
+
+    header = dat[:CANPACKET_HEAD_SIZE]
+
+    bus = (header[0] >> 1) & 0x7
+    address = (header[4] << 24 | header[3] << 16 | header[2] << 8 | header[1]) >> 3
+
+    if (header[1] >> 1) & 0x1:
+      # returned
+      bus += 128
+    if header[1] & 0x1:
+      # rejected
+      bus += 192
+
+    # we need more from the next transfer
+    if data_len > len(dat) - CANPACKET_HEAD_SIZE:
       break
-    counter+=1
-    chunk = tail + dat[i+1:i+64]
-    tail = bytearray()
-    pos = 0
-    while pos<len(chunk):
-      data_len = DLC_TO_LEN[(chunk[pos]>>4)]
-      pckt_len = CANPACKET_HEAD_SIZE + data_len
-      if pckt_len <= len(chunk[pos:]):
-        header = chunk[pos:pos+CANPACKET_HEAD_SIZE]
-        if len(header) < 5:
-          print("CAN: MALFORMED USB RECV PACKET")
-          break
-        bus = (header[0] >> 1) & 0x7
-        address = (header[4] << 24 | header[3] << 16 | header[2] << 8 | header[1]) >> 3
-        returned = (header[1] >> 1) & 0x1
-        rejected = header[1] & 0x1
-        data = chunk[pos + CANPACKET_HEAD_SIZE:pos + CANPACKET_HEAD_SIZE + data_len]
-        if returned:
-          bus += 128
-        if rejected:
-          bus += 192
-        if DEBUG:
-          print(f"  R 0x{address:x}: 0x{data.hex()}")
-        ret.append((address, 0, data, bus))
-        pos += pckt_len
-      else:
-        tail = chunk[pos:]
-        break
-  return ret
+
+    assert calculate_checksum(dat[:(CANPACKET_HEAD_SIZE+data_len)]) == 0, "CAN packet checksum incorrect"
+
+    data = dat[CANPACKET_HEAD_SIZE:(CANPACKET_HEAD_SIZE+data_len)]
+    dat = dat[(CANPACKET_HEAD_SIZE+data_len):]
+
+    ret.append((address, 0, data, bus))
+
+  return (ret, dat)
 
 def ensure_health_packet_version(fn):
   @wraps(fn)
@@ -174,6 +164,7 @@ class Panda:
   SERIAL_ESP = 1
   SERIAL_LIN1 = 2
   SERIAL_LIN2 = 3
+  SERIAL_SOM_DEBUG = 4
 
   GMLAN_CAN2 = 1
   GMLAN_CAN3 = 2
@@ -192,11 +183,11 @@ class Panda:
   HW_TYPE_RED_PANDA_V2 = b'\x08'
   HW_TYPE_TRES = b'\x09'
 
-  CAN_PACKET_VERSION = 2
+  CAN_PACKET_VERSION = 4
   HEALTH_PACKET_VERSION = 11
-  CAN_HEALTH_PACKET_VERSION = 3
+  CAN_HEALTH_PACKET_VERSION = 4
   HEALTH_STRUCT = struct.Struct("<IIIIIIIIIBBBBBBHBBBHfBB")
-  CAN_HEALTH_STRUCT = struct.Struct("<BIBBBBBBBBIIIIIIHHBBB")
+  CAN_HEALTH_STRUCT = struct.Struct("<BIBBBBBBBBIIIIIIIHHBBB")
 
   F2_DEVICES = (HW_TYPE_PEDAL, )
   F4_DEVICES = (HW_TYPE_WHITE_PANDA, HW_TYPE_GREY_PANDA, HW_TYPE_BLACK_PANDA, HW_TYPE_UNO, HW_TYPE_DOS)
@@ -204,9 +195,6 @@ class Panda:
 
   INTERNAL_DEVICES = (HW_TYPE_UNO, HW_TYPE_DOS)
   HAS_OBD = (HW_TYPE_BLACK_PANDA, HW_TYPE_UNO, HW_TYPE_DOS, HW_TYPE_RED_PANDA, HW_TYPE_RED_PANDA_V2, HW_TYPE_TRES)
-
-  CLOCK_SOURCE_MODE_DISABLED = 0
-  CLOCK_SOURCE_MODE_FREE_RUNNING = 1
 
   # first byte is for EPS scaling factor
   FLAG_TOYOTA_ALT_BRAKE = (1 << 8)
@@ -223,6 +211,7 @@ class Panda:
   FLAG_HYUNDAI_CAMERA_SCC = 8
   FLAG_HYUNDAI_CANFD_HDA2 = 16
   FLAG_HYUNDAI_CANFD_ALT_BUTTONS = 32
+  FLAG_HYUNDAI_ALT_LIMITS = 64
 
   FLAG_TESLA_POWERTRAIN = 1
   FLAG_TESLA_LONG_CONTROL = 2
@@ -244,9 +233,14 @@ class Panda:
     self._handle = None
     self._bcd_device = None
 
+    self.can_rx_overflow_buffer = b''
+
     # connect and set mcu type
     self._spi = spi
     self.connect(claim)
+
+    # reset comms
+    self.can_reset_communications()
 
   def close(self):
     self._handle.close()
@@ -258,8 +252,6 @@ class Panda:
     self._handle = None
 
     if self._spi:
-      # TODO: move this back. need to wait until next AGNOS build
-      from .spi import SpiHandle # noqa pylint: disable=import-error
       self._handle = SpiHandle()
 
       # TODO implement
@@ -524,11 +516,12 @@ class Panda:
       "total_tx_cnt": a[13],
       "total_rx_cnt": a[14],
       "total_fwd_cnt": a[15],
-      "can_speed": a[16],
-      "can_data_speed": a[17],
-      "canfd_enabled": a[18],
-      "brs_enabled": a[19],
-      "canfd_non_iso": a[20],
+      "total_tx_checksum_error_cnt": a[16],
+      "can_speed": a[17],
+      "can_data_speed": a[18],
+      "canfd_enabled": a[19],
+      "brs_enabled": a[20],
+      "canfd_non_iso": a[21],
     }
 
   # ******************* control *******************
@@ -602,9 +595,6 @@ class Panda:
 
   # ******************* configuration *******************
 
-  def set_usb_power(self, on):
-    self._handle.controlWrite(Panda.REQUEST_OUT, 0xe6, int(on), 0, b'')
-
   def set_power_save(self, power_save_enabled=0):
     self._handle.controlWrite(Panda.REQUEST_OUT, 0xe7, int(power_save_enabled), 0, b'')
 
@@ -666,6 +656,9 @@ class Panda:
   # Timeout is in ms. If set to 0, the timeout is infinite.
   CAN_SEND_TIMEOUT_MS = 10
 
+  def can_reset_communications(self):
+    self._handle.controlWrite(Panda.REQUEST_OUT, 0xc0, 0, 0, b'')
+
   @ensure_can_packet_version
   def can_send_many(self, arr, timeout=CAN_SEND_TIMEOUT_MS):
     snds = pack_can_buffer(arr)
@@ -695,7 +688,8 @@ class Panda:
       except (usb1.USBErrorIO, usb1.USBErrorOverflow):
         print("CAN: BAD RECV, RETRYING")
         time.sleep(0.1)
-    return unpack_can_buffer(dat)
+    msgs, self.can_rx_overflow_buffer = unpack_can_buffer(self.can_rx_overflow_buffer + dat)
+    return msgs
 
   def can_clear(self, bus):
     """Clears all messages from the specified internal CAN ringbuffer as
@@ -729,6 +723,8 @@ class Panda:
 
   def serial_write(self, port_number, ln):
     ret = 0
+    if type(ln) == str:
+      ln = bytes(ln, 'utf-8')
     for i in range(0, len(ln), 0x20):
       ret += self._handle.bulkWrite(2, struct.pack("B", port_number) + ln[i:i + 0x20])
     return ret
@@ -845,10 +841,6 @@ class Panda:
   # ****************** Phone *****************
   def set_phone_power(self, enabled):
     self._handle.controlWrite(Panda.REQUEST_OUT, 0xb3, int(enabled), 0, b'')
-
-  # ************** Clock Source **************
-  def set_clock_source_mode(self, mode):
-    self._handle.controlWrite(Panda.REQUEST_OUT, 0xf5, int(mode), 0, b'')
 
   # ****************** Siren *****************
   def set_siren(self, enabled):

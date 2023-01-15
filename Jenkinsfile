@@ -11,6 +11,7 @@ export SOURCE_DIR=${env.SOURCE_DIR}
 export GIT_BRANCH=${env.GIT_BRANCH}
 export GIT_COMMIT=${env.GIT_COMMIT}
 export AZURE_TOKEN='${env.AZURE_TOKEN}'
+export MAPBOX_TOKEN='${env.MAPBOX_TOKEN}'
 
 source ~/.bash_profile
 if [ -f /TICI ]; then
@@ -47,9 +48,11 @@ pipeline {
     TEST_DIR = "/data/openpilot"
     SOURCE_DIR = "/data/openpilot_source/"
     AZURE_TOKEN = credentials('azure_token')
+    MAPBOX_TOKEN = credentials('mapbox_token')
   }
   options {
-    timeout(time: 4, unit: 'HOURS')
+    timeout(time: 3, unit: 'HOURS')
+    disableConcurrentBuilds(abortPrevious: env.BRANCH_NAME != 'master')
   }
 
   stages {
@@ -87,7 +90,8 @@ pipeline {
             }
           }
           steps {
-            sh "git config --global --add safe.directory ${WORKSPACE}"
+            sh "git config --global --add safe.directory '*'"
+            sh "git submodule update --init --recursive"
             sh "git lfs pull"
             lock(resource: "", label: "simulator", inversePrecedence: true, quantity: 1) {
               sh "${WORKSPACE}/tools/sim/build_container.sh"
@@ -115,7 +119,6 @@ pipeline {
               ["build master-ci", "cd $SOURCE_DIR/release && TARGET_DIR=$TEST_DIR EXTRA_FILES='tools/' ./build_devel.sh"],
               ["build openpilot", "cd selfdrive/manager && ./build.py"],
               ["check dirty", "release/check-dirty.sh"],
-              ["test manager", "python selfdrive/manager/test/test_manager.py"],
               ["onroad tests", "cd selfdrive/test/ && ./test_onroad.py"],
               ["test car interfaces", "cd selfdrive/car/tests/ && ./test_car_interfaces.py"],
             ])
@@ -141,6 +144,7 @@ pipeline {
               ["test loggerd", "python selfdrive/loggerd/tests/test_loggerd.py"],
               ["test encoder", "LD_LIBRARY_PATH=/usr/local/lib python selfdrive/loggerd/tests/test_encoder.py"],
               ["test pigeond", "python selfdrive/sensord/tests/test_pigeond.py"],
+              ["test manager", "python selfdrive/manager/test/test_manager.py"],
             ])
           }
         }
@@ -186,7 +190,7 @@ pipeline {
           steps {
             phone_steps("tici-common", [
               ["build", "cd selfdrive/manager && ./build.py"],
-              ["model replay", "cd selfdrive/test/process_replay && ./model_replay.py"],
+              ["model replay", "cd selfdrive/test/process_replay && NO_NAV=1 ./model_replay.py"],
             ])
           }
         }
