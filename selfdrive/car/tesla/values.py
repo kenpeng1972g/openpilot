@@ -26,7 +26,7 @@ CAR_INFO: Dict[str, Union[CarInfo, List[CarInfo]]] = {
 
 
 DBC = {
-  CAR.AP1_MODELS: dbc_dict('tesla_powertrain', 'tesla_radar', chassis_dbc='tesla_can'),
+  CAR.AP1_MODELS: dbc_dict('tesla_powertrain', 'tesla_radar_bosch_generated', chassis_dbc='tesla_can'),
   CAR.AP2_MODELS: dbc_dict('tesla_powertrain', 'tesla_radar_bosch_generated', chassis_dbc='tesla_can'),
   CAR.MODELS_RAVEN: dbc_dict('tesla_powertrain', 'tesla_radar_continental_generated', chassis_dbc='tesla_can'),
 }
