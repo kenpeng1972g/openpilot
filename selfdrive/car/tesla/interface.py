@@ -41,7 +41,7 @@ class CarInterface(CarInterfaceBase):
     ret.steerLimitTimer = 1.0
     ret.steerActuatorDelay = 0.25
 
-    if candidate in (CAR.AP1_MODELS, CAR.AP2_MODELS, CAR.AP3_MODELS):
+    if candidate in (CAR.AP1_MODELS, CAR.AP2_MODELS, CAR.MODELS_RAVEN):
       ret.mass = 2100.
       ret.wheelbase = 2.959
       ret.centerToFront = ret.wheelbase * 0.5
