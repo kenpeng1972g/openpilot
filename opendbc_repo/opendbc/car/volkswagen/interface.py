@@ -37,7 +37,7 @@ class CarInterface(CarInterfaceBase):
       # It is documented in a four-part blog series:
       #   https://blog.willemmelching.nl/carhacking/2022/01/02/vw-part1/
       # Panda ALLOW_DEBUG firmware required.
-      ret.dashcamOnly = True
+      ret.dashcamOnly = False
 
     elif ret.flags & VolkswagenFlags.MEB:
       # Set global MEB parameters (ID.4, ID.5, etc.)
